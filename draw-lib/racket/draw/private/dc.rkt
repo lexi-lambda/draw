@@ -296,7 +296,7 @@
         (let ([cr (get-cr)])
           (if cr 
               (begin0
-                (begin . body)
+                (let () . body)
                 (release-cr cr)
                 (end-atomic))
               (begin
@@ -337,6 +337,8 @@
     (define brush-stipple-s #f)
 
     (define alignment-scale 1.0)
+    (define/public (get-alignment-scale)
+      alignment-scale)
     (def/public (set-alignment-scale [positive-real? v])
       (unless (= v alignment-scale)
         (set! alignment-scale v)
@@ -346,8 +348,12 @@
 
     (define x-align-delta 0.5)
     (define y-align-delta 0.5)
+    (define align-always-add-delta? #t)
     (define/private (reset-align!)
       (let ([w (send pen get-width)])
+        ;; Don't always adjust coordinates when the cap is 'butt, since the ends will be aligned
+        ;; to boundaries already
+        (set! align-always-add-delta? (not (eq? (send pen get-cap) 'butt)))
         (if (zero? w)
             (begin
               (set! x-align-delta 0.5)
@@ -415,7 +421,6 @@
       (set! x-align-delta (/ alignment-scale 2.0))
       (set! y-align-delta (/ alignment-scale 2.0))
       (set! smoothing 'unsmoothed)
-      (set! current-smoothing #f)
       (set! alpha 1.0)
       (set! clipping-region #f)
       (end-atomic))
@@ -587,28 +592,138 @@
       (set! smoothing s))
     (def/public (get-smoothing)
       smoothing)
-    (define/private (align-x/delta x delta)
-      (if (aligned? smoothing)
-          (/ (- (+ (floor (+ (* x effective-scale-x) effective-origin-x)) delta) 
-                effective-origin-x) 
-             effective-scale-x)
-          x))
-    (define/private (align-x x)
-      (align-x/delta x x-align-delta))
-    (define/private (align-y/delta y delta)
-      (if (aligned? smoothing)
-          (/ (- (+ (floor (+ (* y effective-scale-y) effective-origin-y)) delta) 
-                effective-origin-y) 
-             effective-scale-y)
-          y))
-    (define/private (align-y y)
-      (align-y/delta y y-align-delta))
+
+    (define/private (align-x x
+                             #:for-pen? [for-pen? #f]
+                             #:add-delta? [add-delta? align-always-add-delta?])
+      (cond
+        [(aligned? smoothing)
+         (define delta (if (and for-pen? add-delta?) x-align-delta 0))
+         (/ (- (+ (floor (+ (* x effective-scale-x) effective-origin-x)) delta) 
+               effective-origin-x) 
+            effective-scale-x)]
+        [else
+         x]))
+    (define/private (align-y y
+                             #:for-pen? [for-pen? #f]
+                             #:add-delta? [add-delta? align-always-add-delta?])
+      (cond
+        [(aligned? smoothing)
+         (define delta (if (and for-pen? add-delta?) y-align-delta 0))
+         (/ (- (+ (floor (+ (* y effective-scale-y) effective-origin-y)) delta) 
+               effective-origin-y) 
+            effective-scale-y)]
+        [else
+         y]))
+
+    (define/private (align-line x1 y1 x2 y2 #:for-pen? [for-pen? #f])
+      (cond
+        ;; When using the 'butt cap, we only want to adjust the coordinates
+        ;; of the broad side of a perfectly horizontal/vertical line
+        [(and for-pen? (not align-always-add-delta?))
+         (define ax1 (align-x x1 #:for-pen? #t))
+         (define ay1 (align-y y1 #:for-pen? #t))
+         (define ax2 (align-x x2 #:for-pen? #t))
+         (define ay2 (align-y y2 #:for-pen? #t))
+         (cond
+           [(= ax1 ax2)
+            (define delta (/ y-align-delta effective-scale-y))
+            (values ax1 (+ ay1 delta) ax2 (+ ay2 delta))]
+           [(= ay1 ay2)
+            (define delta (/ x-align-delta effective-scale-x))
+            (values (+ ax1 delta) ay1 (+ ax2 delta) ay2)]
+           [else
+            (values ax1 ay1 ax2 ay2)])]
+        [else
+         (values (align-x x1 #:for-pen? for-pen?)
+                 (align-y y1 #:for-pen? for-pen?)
+                 (align-x x2 #:for-pen? for-pen?)
+                 (align-y y2 #:for-pen? for-pen?))]))
+
+    (define/private (align-lines pts ; must have at least 2 elements
+                                 #:closed? closed?
+                                 #:for-pen? [for-pen? #f]
+                                 #:x-offset [dx 0]
+                                 #:y-offset [dy 0])
+      (define (pt-x+y pt)
+        (if (pair? pt)
+            (values (+ (car pt) dx) (+ (cdr pt) dy))
+            (values (+ (point-x pt) dx) (+ (point-y pt) dy))))
+      (cond
+        ;; Even when using the 'butt cap, we only need to avoid adjusting the ends
+        [(and for-pen? (not align-always-add-delta?) (not closed?))
+         (define-values (x0 y0) (pt-x+y (car pts)))
+         (define-values (x1 y1) (pt-x+y (cadr pts)))
+         (define rest-pts (cddr pts))
+
+         (cond
+           ;; If there are only two points, just use `align-line`
+           [(null? rest-pts)
+            (align-line x0 y0 x1 y1 #:for-pen? #t)]
+           [else
+            (define x-delta (/ x-align-delta effective-scale-x))
+            (define y-delta (/ y-align-delta effective-scale-y))
+
+            (define (maybe-add-delta-to-point ax1 ay1 ax2 ay2)
+              (define x=? (= ax1 ax2))
+              (define y=? (= ay1 ay2))
+              (cond
+                [(and x=? y=?)
+                 (cons ax1 ay1)]
+                [x=?
+                 (cons ax1 (+ ay1 y-delta))]
+                [y=?
+                 (values (+ ax1 x-delta) ay1)]
+                [else
+                 (cons ax1 ay1)]))
+
+            ;; Adjust the first point if appropriate
+            (define ax0 (align-x x0 #:for-pen? #t))
+            (define ay0 (align-y y0 #:for-pen? #t))
+            (define ax1 (align-x x1 #:for-pen? #t))
+            (define ay1 (align-y y1 #:for-pen? #t))
+
+            (list* (maybe-add-delta-to-point ax0 ay0 ax1 ay1)
+                   (cons (+ ax1 x-delta) (+ ay1 y-delta))
+                   (cond
+                     ;; If there are only three points, handle the last point directly
+                     [(null? (cdr rest-pts))
+                      (define-values (x2 y2) (pt-x+y (car rest-pts)))
+                      (define ax2 (align-x x2 #:for-pen? #t))
+                      (define ay2 (align-y y2 #:for-pen? #t))
+                      (list (maybe-add-delta-to-point ax2 ay2 ax1 ay1))]
+                     ;; Otherwise, loop until we find it
+                     [else
+                      (define-values (xa ya) (pt-x+y (car pts)))
+                      (let loop ([xa xa]
+                                 [ya ya]
+                                 [next-pt (cadr rest-pts)]
+                                 [rest-pts (cddr rest-pts)])
+                        (define-values (xb yb) (pt-x+y next-pt))
+                        (cond
+                          ;; Once we get to the end, adjust the last point if appropriate
+                          [(null? rest-pts)
+                           (define axa (align-x xa #:for-pen? #t))
+                           (define aya (align-y ya #:for-pen? #t))
+                           (define axb (align-x xb #:for-pen? #t))
+                           (define ayb (align-y yb #:for-pen? #t))
+                           (list (cons (+ axa x-delta) (+ aya y-delta))
+                                 (maybe-add-delta-to-point axb ayb axa aya))]
+                          ;; For every other point, always adjust
+                          [else
+                           (cons (cons (align-x xa #:for-pen? #t #:add-delta? #t)
+                                       (align-y ya #:for-pen? #t #:add-delta? #t))
+                                 (loop xb yb (car rest-pts) (cdr rest-pts)))]))]))])]
+
+        ;; Simple cases (always adjust every point)
+        [else
+         (for/list ([pt (in-list pts)])
+           (cons (align-x (+ (car pt) dx) #:for-pen? for-pen? #:add-delta? #t)
+                 (align-y (+ (cdr pt) dy) #:for-pen? for-pen? #:add-delta? #t)))]))
 
     ;; No alignment in any smoothing mode for text:
     (define/private (text-align-x/delta x delta) x)
     (define/private (text-align-y/delta y delta) y)
-
-    (define current-smoothing #f)
 
     (define/private (set-font-antialias context smoothing hinting)
       (let ([o (pango_cairo_context_get_font_options context)]
@@ -1116,14 +1231,14 @@
       (with-cr 
        (check-ok who)
        cr
-       (let ([draw-one (lambda (align-x align-y brush? pen? sub1w sub1h)
+       (let ([draw-one (lambda (brush? pen? sub1w sub1h)
                          (let* ([orig-x x]
                                 [orig-y y]
-                                [x (align-x x)]
-                                [y (align-y y)]
-                                [width (- (align-x (+ orig-x width)) x)]
+                                [x (align-x x #:for-pen? pen?)]
+                                [y (align-y y #:for-pen? pen?)]
+                                [width (- (align-x (+ orig-x width) #:for-pen? pen?) x)]
                                 [width (sub1w width)]
-                                [height (- (align-y (+ orig-y height)) y)]
+                                [height (- (align-y (+ orig-y height) #:for-pen? pen?) y)]
                                 [height (sub1h height)]
                                 [radius-x (/ width 2)]
                                 [radius-y (/ height 2)]
@@ -1146,10 +1261,9 @@
                              (cairo_restore cr)
                              (draw cr brush? pen?))))])
          (when (brush-draws?)
-           (draw-one (lambda (x) x) (lambda (y) y) #t #f (lambda (x) x) (lambda (x) x)))
+           (draw-one #t #f (lambda (x) x) (lambda (x) x)))
          (when (pen-draws?)
-           (draw-one (lambda (x) (align-x x)) (lambda (y) (align-y y)) #f #t 
-                     (lambda (x) (sub1w x)) (lambda (x) (sub1h x)))))))
+           (draw-one #f #t (lambda (x) (sub1w x)) (lambda (x) (sub1h x)))))))
 
     (def/public (draw-arc [real? x] [real? y] [nonnegative-real? width] [nonnegative-real? height]
                           [real? start-radians] [real? end-radians])
@@ -1159,98 +1273,114 @@
       (do-draw-arc 'draw-ellipse x y width height 0 2pi))
 
     (def/public (draw-line [real? x1] [real? y1] [real? x2] [real? y2])
-      (let ([dot (if (and (= x1 x2) (= y1 y2))
-                     0.1
-                     0)])
-        (with-cr
-         (check-ok 'draw-line)
-         cr
-         (cairo_new_path cr)
-         (cairo_move_to cr (align-x x1) (align-y y1))
-         (cairo_line_to cr (+ (align-x x2) dot) (+ (align-y y2) dot))
-         (draw cr #f #t))))
+      (define-values (ax1 ay1 ax2 ay2)
+        (cond
+          [(and (= x1 x2) (= y1 y2))
+           (define ax (align-x x1 #:for-pen? #t))
+           (define ay (align-y y1 #:for-pen? #t))
+           (values ax ay (+ ax 0.1) (+ ay 0.1))]
+          [else
+           (align-line x1 y1 x2 y2 #:for-pen? #t)]))
+      (with-cr
+        (check-ok 'draw-line)
+        cr
+        (cairo_new_path cr)
+        (cairo_move_to cr ax1 ay1)
+        (cairo_line_to cr ax2 ay2)
+        (draw cr #f #t)))
     
     (def/public (draw-point [real? x] [real? y])
       (with-cr
        (check-ok 'draw-point)
        cr
        (cairo_new_path cr)
-       (let ([x (align-x x)]
-             [y (align-y y)])
+       (let ([x (align-x x #:for-pen? #t)]
+             [y (align-y y #:for-pen? #t)])
          (cairo_move_to cr x y)
          (cairo_line_to cr (+ 0.1 x) (+ 0.1 y))
        (draw cr #f #t))))
 
     (def/public (draw-lines [(make-alts (make-list point%) list-of-pair-of-real?) pts]
                             [real? [x 0.0]] [real? [y 0.0]])
-      (do-draw-lines 'draw-lines pts x y #f))
+      (do-draw-lines 'draw-lines pts x y #f #f))
 
     (def/public (draw-polygon [(make-alts (make-list point%) list-of-pair-of-real?) pts]
                               [real? [x 0.0]] [real? [y 0.0]]
                               [(symbol-in odd-even winding) [fill-style 'odd-even]])
-      (do-draw-lines 'draw-polygon pts x y fill-style))
+      (do-draw-lines 'draw-polygon pts x y #t fill-style)
+      (do-draw-lines 'draw-polygon pts x y #t #f))
 
-    (define/public (do-draw-lines who pts x y fill-style)
+    (define/public (do-draw-lines who pts x y close? fill-style)
       (if (or (null? pts)
               (null? (cdr pts)))
           (check-ok who)
           (with-cr
            (check-ok who)
            cr
+           (define aligned-pts (align-lines pts
+                                            #:closed? close?
+                                            #:for-pen? (not fill-style)
+                                            #:offset-x x
+                                            #:offset-y y))
            (cairo_new_path cr)
-           (if (pair? (car pts))
-               (cairo_move_to cr (align-x (+ x (caar pts))) (align-y (+ y (cdar pts))))
-               (cairo_move_to cr (align-x (+ x (point-x (car pts)))) (align-y (+ y (point-y (car pts))))))
-           (for ([p (in-list (cdr pts))])
-             (if (pair? p)
-                 (cairo_line_to cr (align-x (+ x (car p))) (align-y (+ y (cdr p))))
-                 (cairo_line_to cr (align-x (+ x (point-x p))) (align-y (+ y (point-y p))))))
+           (cairo_move_to cr (caar aligned-pts) (cdar aligned-pts))
+           (for ([pt (in-list (cdr aligned-pts))])
+             (cairo_line_to cr (car pt) (cdr pt)))
+           (when close?
+             (cairo_close_path cr))
            (when fill-style
-             (cairo_close_path cr)
              (cairo_set_fill_rule cr (if (eq? fill-style 'winding)
                                          CAIRO_FILL_RULE_WINDING
                                          CAIRO_FILL_RULE_EVEN_ODD)))
-           (draw cr fill-style #t))))
+           (draw cr fill-style (not fill-style)))))
     
     (def/public (draw-rectangle [real? x] [real? y] [nonnegative-real? width] [nonnegative-real? height])
       (with-cr
-       (check-ok 'draw-rectangle)
-       cr
-       ;; have to do pen separate from brush for 
-       ;; both alignment and height/width adjustment
-       (let ([ax (align-x x)]
-             [ay (align-y y)])
-         (cairo_new_path cr)
-         (cairo_rectangle cr x y width height)
-         (draw cr #t #f)
-         (let ([w2 (- (align-x (+ x (sub1w width))) ax)]
-               [h2 (- (align-y (+ y (sub1h height))) ay)])
-           (when (and (positive? w2)
-                      (positive? h2))
-             (cairo_new_path cr)
-             (cairo_rectangle cr ax ay w2 h2)
-             (draw cr #f #t))))))
+        (check-ok 'draw-rectangle)
+        cr
+        ;; have to do pen separate from brush for 
+        ;; both alignment and height/width adjustment
+        (define (do-rectangle w h brush? pen?)
+          (define ax (align-x x #:for-pen? pen?))
+          (define ay (align-y y #:for-pen? pen?))
+          (define aw (- (align-x (+ x w) #:for-pen? pen?) ax))
+          (define ah (- (align-y (+ y h) #:for-pen? pen?) ay))
+          (when (and (positive? aw)
+                     (positive? ah))
+            (cairo_new_path cr)
+            (cairo_rectangle cr ax ay aw ah)
+            (draw cr brush? pen?)))
+        (do-rectangle width height #t #f)
+        (do-rectangle (sub1w width) (sub1h height) #f #t)))
 
     (def/public (draw-rounded-rectangle [real? x] [real? y] [nonnegative-real? width] [nonnegative-real? height]
                                         [real? [radius -0.25]])
       (with-cr
-       (check-ok 'draw-rounded-rectangle)
-       cr
-       ;; have to do pen separate from brush for 
-       ;; both alignment and height/width adjustment
-       (let ([rounded-rect
-              (lambda (x y w h align-x align-y)
-                (let ([p (new dc-path%)])
-                  (send p rounded-rectangle x y w h radius)
-                  (cairo_new_path cr)
-                  (send p do-path cr align-x align-y)))])
-         (when (brush-draws?)
-           (rounded-rect x y width height (lambda (x) x) (lambda (y) y))
-           (draw cr #t #f))
-         (when (pen-draws?)
-           (rounded-rect x y (sub1w width) (sub1h height)
-                         (lambda (x) (align-x x)) (lambda (y) (align-y y)))
-           (draw cr #f #t)))))
+        (check-ok 'draw-rounded-rectangle)
+        cr
+        ;; have to do pen separate from brush for 
+        ;; both alignment and height/width adjustment
+        (define (do-rounded-rect w h brush? pen?)
+          (define (do-align-x x) (align-x x #:for-pen? pen?))
+          (define (do-align-y y) (align-y y #:for-pen? pen?))
+          (define p (new dc-path%))
+          (send p rounded-rectangle x y w h radius)
+          (cairo_new_path cr)
+          (send p do-path cr do-align-x do-align-y)
+          (draw cr brush? pen?))
+        (let ([rounded-rect
+               (lambda (x y w h align-x align-y)
+                 (let ([p (new dc-path%)])
+                   (send p rounded-rectangle x y w h radius)
+                   (cairo_new_path cr)
+                   (send p do-path cr align-x align-y)))])
+          (when (brush-draws?)
+            (rounded-rect x y width height (lambda (x) x) (lambda (y) y))
+            (draw cr #t #f))
+          (when (pen-draws?)
+            (rounded-rect x y (sub1w width) (sub1h height)
+                          (lambda (x) (align-x x)) (lambda (y) (align-y y)))
+            (draw cr #f #t)))))
     
     (def/public (get-path-bounding-box [dc-path% path] [bounding-box-type? type])
       (with-cr

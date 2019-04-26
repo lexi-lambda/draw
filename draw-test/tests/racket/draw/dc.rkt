@@ -925,6 +925,28 @@
 (test #f 'undef-bitmap (impersonator? (make-object bitmap% 10 10)))
 (test #f 'undef-bitmap-dc (impersonator? (new bitmap-dc%)))
 
+;; -----------------------------------------------------------
+;; Check aligned drawing with a modified alignment scale
+
+(let ()
+  (define (get-aligned-line-bytes alignment)
+    (define bmp (make-bitmap 4 4 #:backing-scale 2))
+    (define dc (new bitmap-dc% [bitmap bmp]))
+    (send dc set-smoothing 'aligned)
+    (send dc set-alignment-scale alignment)
+
+    (test 'aligned 'get-smoothing (send dc get-smoothing))
+    (test alignment 'get-alignment-scale (send dc get-alignment-scale))
+
+    (send dc draw-line 1.5 1.5 2.5 1.5)
+
+    (define bs (make-bytes 32))
+    (send bmp get-argb-bytes 0 0 8 8 bs #:unscaled? #t)
+    (bytes->list bs))
+
+  (test '()
+        get-aligned-line-bytes 1.0))
+
 ;; ----------------------------------------
 
 (report-errs)

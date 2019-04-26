@@ -99,6 +99,7 @@
     [end-page (->m void?)]
     [erase (->m void?)]
     [flush (->m void?)]
+    [get-alignment-scale (->m (>/c 0.0))]
     [get-alpha (->m real?)]
     [get-background (->m (is-a?/c color%))]
     [get-backing-scale (->m (>/c 0.0))]

@@ -488,6 +488,14 @@ Calls the @xmethod[canvas<%> flush] method for
 drawing contexts.}
 
 
+@defmethod[(get-alignment-scale)
+           (>/c 0.0)]{
+
+Gets the drawing context's current @tech{alignment scale};
+see @method[dc<%> set-alignment-scale].
+
+@history[#:added "1.16"]}
+
 
 @defmethod[(get-alpha)
            (real-in 0 1)]{
