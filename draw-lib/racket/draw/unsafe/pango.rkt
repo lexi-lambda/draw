@@ -7,6 +7,8 @@
          "../private/utils.rkt"
          "../private/libs.rkt")
 
+(provide (protect-out pango-lib pangocairo-lib))
+
 (define-runtime-lib pango-lib
   [(unix) (ffi-lib "libpango-1.0" '("0" ""))]
   [(macosx)
@@ -235,7 +237,8 @@
 (define-pango pango_language_get_default (_pfun -> PangoLanguage)
   ;; not available before 1.16
   #:fail (lambda () (lambda () #f)))
-(define-pango pango_font_map_load_font (_pfun PangoFontMap PangoContext PangoFontDescription -> (_or-null PangoFont)))
+(define-pango pango_font_map_load_font (_pfun PangoFontMap PangoContext PangoFontDescription -> (_or-null PangoFont))
+  #:wrap (allocator g_object_unref))
 (define-pango pango_coverage_unref (_pfun PangoCoverage -> _void)
   #:wrap (deallocator))
 (define-pango pango_font_get_coverage (_pfun PangoFont PangoLanguage -> PangoCoverage)

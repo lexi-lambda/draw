@@ -24,6 +24,8 @@
 
   ;; dc%
   in-cairo-context
+  get-pango-context
+  get-pango-font
   get-clipping-matrix
   reset-config
   internal-copy

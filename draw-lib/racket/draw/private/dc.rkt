@@ -97,7 +97,7 @@
     ;; Resets the clipping region
     reset-clip
 
-    ;; method get-pango : -> pango_font_desc
+    ;; method get-pango : font -> pango_font_desc
     ;; 
     ;; Gets a Pango font description for a given font
     get-pango
@@ -625,10 +625,10 @@
     (define current-smoothing #f)
 
     (define/private (set-font-antialias context smoothing hinting)
-      (let ([o (pango_cairo_context_get_font_options context)]
-            [o2 (cairo_font_options_create)])
-        (when o
-          (cairo_font_options_copy o2 o))
+      (let* ([o (pango_cairo_context_get_font_options context)]
+             [o2 (if o
+                     (cairo_font_options_copy o)
+                     (cairo_font_options_create))])
         (cairo_font_options_set_antialias
          o2 
          (case smoothing
@@ -1470,6 +1470,10 @@
                                 (send font get-hinting))
 	    c)))
 
+    (define/public (get-pango-context cr font)
+      (define smoothing-index (get-smoothing-index font))
+      (get-context cr smoothing-index font current-xform))
+
     (define/private (get-font-map smoothing-index xform)
       (cond
        [(smoothing-index . < . multi-font-map-boundary)
@@ -2198,12 +2202,27 @@
           (let-values ([(w h d a) (get-text-extent "X")])
             h)))
 
+    (define/public (get-pango-font font
+                                   [failure-result
+                                    (lambda ()
+                                      (raise-arguments-error 'get-pango-font "no font matched"
+                                                             "font" font))])
+      (or (with-unchanged-cr
+            (check-ok 'get-pango-font)
+            cr
+            (do-get-pango-font cr font))
+          (if (procedure? failure-result)
+              (failure-result)
+              failure-result)))
+
+    (define/private (do-get-pango-font cr font)
+      (define index (get-smoothing-index font))
+      (define fontmap (get-font-map index current-xform))
+      (define context (get-context cr index font current-xform))
+      (pango_font_map_load_font fontmap context (get-pango font)))
+
     (define/private (get-font-metric cr sel s-sel)
-      (let* ([desc (get-pango font)]
-	     [index (get-smoothing-index font)]
-	     [context (get-context cr index font current-xform)]
-	     [fontmap (get-font-map index current-xform)]
-	     [font (pango_font_map_load_font fontmap context desc)])
+      (let* ([font (do-get-pango-font cr font)])
           (and font ;; else font match failed
                (let ([metrics (pango_font_get_metrics font (pango_language_get_default))]
                      [mx (make-cairo_matrix_t 1 0 0 1 0 0)])
